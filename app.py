@@ -4,172 +4,174 @@ import os
 import json
 import re
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Tutor ENARM GPC", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Tutor ENARM IA", page_icon="🩺", layout="wide")
 
+# --- 1. CONFIGURACIÓN DE IA ---
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
-except Exception as e:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+except:
     st.error("⚠️ Falla crítica: No se encontró GEMINI_API_KEY en los Secrets.")
     st.stop()
 
-# --- 2. MANEJO DE ESTADO (MEMORIA DE LA APP) ---
-# Aquí guardamos el caso actual y si ya lo calificamos para que no se borre
+# --- 2. SISTEMA DE BASE DE DATOS LOCAL (JSON) ---
+ARCHIVO_HISTORIAL = "historial_enarm.json"
+
+def cargar_historial():
+    if os.path.exists(ARCHIVO_HISTORIAL):
+        with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"aciertos": 0, "errores": 0, "temas": {}}
+
+def guardar_historial(datos):
+    with open(ARCHIVO_HISTORIAL, "w", encoding="utf-8") as f:
+        json.dump(datos, f, indent=4)
+
+if "historial" not in st.session_state:
+    st.session_state.historial = cargar_historial()
+
+def registrar_respuesta(tema, es_correcta):
+    hist = st.session_state.historial
+    # Actualizar totales
+    if es_correcta:
+        hist["aciertos"] += 1
+    else:
+        hist["errores"] += 1
+    
+    # Actualizar por tema
+    if tema not in hist["temas"]:
+        hist["temas"][tema] = {"aciertos": 0, "errores": 0}
+    
+    if es_correcta:
+        hist["temas"][tema]["aciertos"] += 1
+    else:
+        hist["temas"][tema]["errores"] += 1
+        
+    guardar_historial(hist)
+
+# --- 3. ESTADO DEL SIMULADOR ---
 if "caso_actual" not in st.session_state:
     st.session_state.caso_actual = None
 if "evaluado" not in st.session_state:
     st.session_state.evaluado = False
 
-def limpiar_estado():
-    # Esta función borra el caso viejo si seleccionas otro tema
-    st.session_state.caso_actual = None
-    st.session_state.evaluado = False
-
-# --- 3. FUNCIÓN DE ROTACIÓN DE MODELOS ---
-def generar_con_fallback(prompt_texto):
-    modelos_a_probar = [
-        'gemini-3.1-flash-lite',
-        'gemini-3.1-flash-lite-preview',
-        'gemini-2.5-flash',
-        'gemini-1.5-flash'
-    ]
-    for nombre_modelo in modelos_a_probar:
-        try:
-            modelo = genai.GenerativeModel(nombre_modelo)
-            respuesta = modelo.generate_content(prompt_texto)
-            return respuesta.text, nombre_modelo
-        except Exception as e:
-            print(f"⚠️ {nombre_modelo} falló. Intentando el siguiente...")
-            continue
-    raise Exception("Todos los modelos fallaron.")
-
-# --- 4. BÚSQUEDA DE ARCHIVOS (UI LIMPIA) ---
+# --- 4. BÚSQUEDA DE ARCHIVOS ---
 def buscar_gpc():
-    mapa_gpc = {}
+    mapa = {}
     for raiz, carpetas, archivos in os.walk("."):
-        if ".git" in raiz or ".streamlit" in raiz:
-            continue
-        for archivo in archivos:
-            if archivo.endswith(".md") and archivo.lower() != "readme.md":
-                # Limpiamos el nombre: "Preeclampsia.md" -> "Preeclampsia"
-                nombre_limpio = archivo.replace(".md", "")
-                
-                # Para evitar confusiones si tienes dos archivos con el mismo nombre, 
-                # le ponemos la carpeta padre al lado sutilmente. Ej: "Sepsis (Pediatría)"
-                carpeta_padre = os.path.basename(raiz)
-                if carpeta_padre and carpeta_padre != ".":
-                    nombre_mostrar = f"{nombre_limpio}  —  [{carpeta_padre}]"
-                else:
-                    nombre_mostrar = nombre_limpio
-                    
-                ruta_real = os.path.join(raiz, archivo)
-                mapa_gpc[nombre_mostrar] = ruta_real
-    return mapa_gpc
+        if ".git" in raiz or ".streamlit" in raiz: continue
+        for arch in archivos:
+            if arch.endswith(".md") and arch.lower() != "readme.md":
+                nombre = arch.replace(".md", "")
+                mapa[nombre] = os.path.join(raiz, arch)
+    return mapa
 
 diccionario_gpc = buscar_gpc()
 
-# --- 5. INTERFAZ DE USUARIO (SIDEBAR) ---
-st.sidebar.title("🧠 Panel del Tutor")
-st.sidebar.markdown("---")
+# --- 5. INTERFAZ: SIDEBAR ---
+st.sidebar.title("⚙️ Configuración ENARM")
+tema_seleccionado = st.sidebar.selectbox("📖 Selecciona Tema:", sorted(list(diccionario_gpc.keys())))
 
-if not diccionario_gpc:
-    st.sidebar.error("❌ No encontré archivos .md.")
-    opciones = []
-else:
-    # Ordenamos alfabéticamente para que se vea más pro
-    opciones = sorted(list(diccionario_gpc.keys()))
+# Clasificación Taxonomía de Bloom
+dificultad_bloom = st.sidebar.radio("🧠 Nivel Cognitivo (Bloom):", [
+    "Bajo (Recordar/Comprender - Memoria)",
+    "Medio (Aplicar - Casos clínicos directos)",
+    "Alto (Analizar/Evaluar - ¿Qué hacer a continuación?)"
+], index=2) # Por defecto en ALTO
 
-# Si el usuario cambia de tema, limpiamos la pantalla
-tema_seleccionado = st.sidebar.selectbox("📖 Selecciona una GPC:", opciones, on_change=limpiar_estado)
+# --- 6. PESTAÑAS DE NAVEGACIÓN ---
+tab1, tab2 = st.tabs(["📝 Simulador Clínico", "📊 Mi Rendimiento"])
 
-st.sidebar.markdown("---")
-debilidad = st.sidebar.text_input("🎯 ¿En qué estás batallando?", placeholder="Ej: Tratamiento, Dosis...")
-nivel = st.sidebar.select_slider("🔥 Dificultad:", options=["Interno", "Residente", "Especialista"])
-
-# --- 6. GENERACIÓN DEL CASO (JSON) ---
-st.title("👨‍⚕️ Simulador Clínico Interactivo")
-
-if st.sidebar.button("🚀 Generar Caso Nuevo"):
-    with st.spinner(f"Creando caso seriado de {tema_seleccionado}..."):
-        ruta_archivo = diccionario_gpc[tema_seleccionado]
-        with open(ruta_archivo, "r", encoding="utf-8") as f:
-            contenido_gpc = f.read()
-
-        # Le exigimos a la IA que devuelva un formato JSON estructurado
-        prompt = f"""
-        Eres un sinodal del ENARM. Basado en esta GPC: {contenido_gpc}.
-        Genera un caso clínico seriado de 1 a 3 preguntas. Dificultad: {nivel}. Enfoque: {debilidad}.
-        
-        DEVUELVE ÚNICAMENTE UN OBJETO JSON VÁLIDO con esta estructura exacta, sin texto extra antes ni después:
-        {{
-            "historia_clinica": "Paciente de X años acude a urgencias...",
-            "preguntas": [
-                {{
-                    "id": 1,
-                    "texto": "¿Cuál es el diagnóstico más probable?",
-                    "opciones": ["A) Opción 1", "B) Opción 2", "C) Opción 3", "D) Opción 4"],
-                    "respuesta_correcta": "A) Opción 1",
-                    "justificacion": "Según la GPC, la presencia de X indica..."
-                }}
-            ]
-        }}
-        """
-        
-        try:
-            texto_crudo, mod = generar_con_fallback(prompt)
-            # Limpiamos el texto por si la IA le pone comillas raras de markdown (```json ... ```)
-            texto_limpio = re.sub(r'```json\n|```\n?', '', texto_crudo).strip()
-            
-            # Convertimos el string a un diccionario de Python real
-            st.session_state.caso_actual = json.loads(texto_limpio)
-            st.session_state.evaluado = False
-            
-        except json.JSONDecodeError:
-            st.error("🚨 La IA no devolvió un formato válido. Intenta generarlo de nuevo.")
-        except Exception as e:
-            st.error(f"🚨 Error: {e}")
-
-# --- 7. RENDERIZADO DEL CASO INTERACTIVO ---
-if st.session_state.caso_actual:
-    caso = st.session_state.caso_actual
+with tab1:
+    st.title("Simulador de Casos ENARM")
     
-    st.markdown("### 📋 Historia Clínica")
-    st.info(caso["historia_clinica"])
-    st.markdown("---")
-    
-    # Creamos un formulario para que el usuario responda
-    with st.form("formulario_enarm"):
-        respuestas_usuario = {}
-        
-        # Iteramos sobre las preguntas que generó la IA (pueden ser 1, 2 o 3)
-        for i, preg in enumerate(caso["preguntas"]):
-            st.markdown(f"**Pregunta {i+1}:** {preg['texto']}")
-            # st.radio crea las opciones interactivas
-            respuestas_usuario[i] = st.radio("Selecciona tu respuesta:", preg["opciones"], key=f"rad_{i}")
-            st.markdown("<br>", unsafe_allow_html=True) # Espacio visual
-            
-        # Botón para calificar
-        submit = st.form_submit_button("✅ Calificar mis respuestas")
-        
-        if submit:
-            st.session_state.evaluado = True
+    if st.button("🚀 Generar Caso de este Tema"):
+        with st.spinner("El sinodal está creando un caso con trampa..."):
+            with open(diccionario_gpc[tema_seleccionado], "r", encoding="utf-8") as f:
+                contenido = f.read()
 
-    # --- 8. RETROALIMENTACIÓN ---
-    if st.session_state.evaluado:
-        st.markdown("## 📊 Resultados")
-        
-        for i, preg in enumerate(caso["preguntas"]):
-            correcta = preg["respuesta_correcta"]
-            elegida = respuestas_usuario[i]
+            prompt = f"""
+            Eres un creador de reactivos para el ENARM. Usa la GPC: {contenido}
+            Crea 1 pregunta de caso clínico.
             
-            # Comparamos si la opción que eligió es igual a la correcta
-            if elegida == correcta:
-                st.success(f"**Pregunta {i+1}: CORRECTA 🎉**")
-            else:
-                st.error(f"**Pregunta {i+1}: INCORRECTA ❌**")
-                st.write(f"Tu respuesta: `{elegida}`")
+            REGLAS ESTRICTAS DEL ENARM:
+            - Nivel de Taxonomía de Bloom: {dificultad_bloom}.
+            - Si es nivel Medio/Alto, NO preguntes teoría. Pregunta "¿Cuál es el estudio inicial?", "¿Cuál es el estándar de oro?", o "¿Cuál es el manejo definitivo/siguiente paso?".
+            - Usa distractores que parezcan correctos pero que no sean la primera línea de la GPC.
+            
+            DEVUELVE SOLO UN JSON (sin comillas markdown) con esta estructura:
+            {{
+                "historia_clinica": "Paciente...",
+                "pregunta": "¿Cuál es el siguiente paso en el manejo?",
+                "opciones": ["A) ", "B) ", "C) ", "D) "],
+                "respuesta_correcta": "A) ",
+                "justificacion": "Explicación heurística y médica"
+            }}
+            """
+            
+            try:
+                modelo = genai.GenerativeModel('gemini-3.1-flash-lite') # o el que uses
+                resp = modelo.generate_content(prompt)
+                texto_limpio = re.sub(r'```json\n|```\n?', '', resp.text).strip()
+                st.session_state.caso_actual = json.loads(texto_limpio)
+                st.session_state.evaluado = False
+            except Exception as e:
+                st.error(f"Error generando el JSON: {e}")
+
+    # Renderizar el caso
+    if st.session_state.caso_actual:
+        caso = st.session_state.caso_actual
+        st.info(caso["historia_clinica"])
+        
+        with st.form("examen"):
+            st.write(f"**{caso['pregunta']}**")
+            respuesta_usuario = st.radio("Selecciona tu respuesta:", caso["opciones"])
+            submit = st.form_submit_button("Calificar")
+            
+            if submit:
+                st.session_state.evaluado = True
+                es_correcta = respuesta_usuario == caso["respuesta_correcta"]
+                # GUARDAR EN LA BASE DE DATOS LOCAL
+                registrar_respuesta(tema_seleccionado, es_correcta)
                 
-            st.write(f"**Respuesta correcta:** `{correcta}`")
-            st.write(f"**Justificación de la GPC:** {preg['justificacion']}")
+        if st.session_state.evaluado:
             st.markdown("---")
+            if respuesta_usuario == caso["respuesta_correcta"]:
+                st.success("✅ ¡Correcto!")
+            else:
+                st.error("❌ Incorrecto")
+                st.write(f"Tu respuesta: `{respuesta_usuario}`")
+            
+            st.write(f"**Respuesta Correcta:** `{caso['respuesta_correcta']}`")
+            st.write(f"**Análisis:** {caso['justificacion']}")
+
+with tab2:
+    st.title("📊 Dashboard Analítico ENARM")
+    hist = st.session_state.historial
+    
+    total_preguntas = hist["aciertos"] + hist["errores"]
+    
+    if total_preguntas == 0:
+        st.info("Aún no tienes historial. ¡Resuelve tu primer caso!")
+    else:
+        # Métricas Generales
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Casos Resueltos", total_preguntas)
+        col2.metric("Aciertos", hist["aciertos"])
+        efectividad = round((hist["aciertos"] / total_preguntas) * 100, 1)
+        col3.metric("Efectividad Global", f"{efectividad}%")
+        
+        st.markdown("### 🎯 Desempeño por Tema (GPC)")
+        
+        # Crear datos para la gráfica
+        datos_grafica = {"Aciertos": {}, "Errores": {}}
+        for t, stats in hist["temas"].items():
+            datos_grafica["Aciertos"][t] = stats["aciertos"]
+            datos_grafica["Errores"][t] = stats["errores"]
+            
+        st.bar_chart(datos_grafica)
+        
+        st.markdown("### 🚨 Temas Prioritarios a Repasar")
+        # Mostrar los temas donde hay más errores que aciertos
+        for t, stats in hist["temas"].items():
+            if stats["errores"] > stats["aciertos"]:
+                st.error(f"🔥 {t}: {stats['errores']} errores vs {stats['aciertos']} aciertos")
