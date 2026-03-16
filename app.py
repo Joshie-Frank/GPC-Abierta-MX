@@ -4,10 +4,9 @@ import os
 import json
 import re
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Tutor ENARM IA", page_icon="🩺", layout="wide")
 
-# --- 2. CONFIGURACIÓN DE IA ---
+# --- 1. CONFIGURACIÓN DE IA ---
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception as e:
@@ -15,23 +14,17 @@ except Exception as e:
     st.stop()
 
 def generar_con_fallback(prompt_texto):
-    """Mecanismo de respaldo para rotar modelos si uno falla o se queda sin cuota."""
-    modelos_a_probar = [
-        'gemini-3.1-flash-lite',
-        'gemini-3.1-flash-lite-preview',
-        'gemini-1.5-flash'
-    ]
+    modelos_a_probar = ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite-preview', 'gemini-1.5-flash']
     for nombre_modelo in modelos_a_probar:
         try:
             modelo = genai.GenerativeModel(nombre_modelo)
             respuesta = modelo.generate_content(prompt_texto)
             return respuesta.text, nombre_modelo
         except Exception as e:
-            print(f"⚠️ {nombre_modelo} falló: {e}. Intentando el siguiente...")
             continue
     raise Exception("Todos los modelos fallaron. Revisa tu cuota o conexión.")
 
-# --- 3. SISTEMA DE BASE DE DATOS LOCAL (JSON) ---
+# --- 2. BASE DE DATOS LOCAL: EL "LIBRO DE REGISTROS" ---
 ARCHIVO_HISTORIAL = "historial_enarm.json"
 
 def cargar_historial():
@@ -39,8 +32,7 @@ def cargar_historial():
         try:
             with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
-            pass
+        except: pass
     return {"aciertos": 0, "errores": 0, "temas": {}}
 
 def guardar_historial(datos):
@@ -50,204 +42,183 @@ def guardar_historial(datos):
 if "historial" not in st.session_state:
     st.session_state.historial = cargar_historial()
 
-def registrar_respuesta(tema, es_correcta):
+def registrar_respuesta(tema, concepto, es_correcta):
     hist = st.session_state.historial
-    if es_correcta:
-        hist["aciertos"] += 1
-    else:
-        hist["errores"] += 1
+    if es_correcta: hist["aciertos"] += 1
+    else: hist["errores"] += 1
     
     if tema not in hist["temas"]:
-        hist["temas"][tema] = {"aciertos": 0, "errores": 0}
+        hist["temas"][tema] = {"aciertos": 0, "errores": 0, "conceptos_clave": {}}
     
+    # Registro general del tema
+    if es_correcta: hist["temas"][tema]["aciertos"] += 1
+    else: hist["temas"][tema]["errores"] += 1
+    
+    # Registro específico del "Micro-tema" (ej. Escala de Padua)
+    if concepto not in hist["temas"][tema]["conceptos_clave"]:
+        hist["temas"][tema]["conceptos_clave"][concepto] = {"aciertos": 0, "errores": 0}
+        
     if es_correcta:
-        hist["temas"][tema]["aciertos"] += 1
+        hist["temas"][tema]["conceptos_clave"][concepto]["aciertos"] += 1
     else:
-        hist["temas"][tema]["errores"] += 1
+        hist["temas"][tema]["conceptos_clave"][concepto]["errores"] += 1
         
     guardar_historial(hist)
-    # Refrescar la variable de sesión para que la gráfica se actualice de inmediato
     st.session_state.historial = hist
 
-# --- 4. ESTADO DEL SIMULADOR ---
-if "caso_actual" not in st.session_state:
-    st.session_state.caso_actual = None
-if "evaluado" not in st.session_state:
-    st.session_state.evaluado = False
+# --- 3. ESTADO REACTIVO DEL SIMULADOR ---
+if "caso_actual" not in st.session_state: st.session_state.caso_actual = None
+if "evaluado" not in st.session_state: st.session_state.evaluado = False
+if "fue_correcta" not in st.session_state: st.session_state.fue_correcta = False
+if "respuesta_usuario" not in st.session_state: st.session_state.respuesta_usuario = ""
 
 def limpiar_estado():
     st.session_state.caso_actual = None
     st.session_state.evaluado = False
+    st.session_state.fue_correcta = False
+    st.session_state.respuesta_usuario = ""
 
-# --- 5. BÚSQUEDA DE ARCHIVOS GPC ---
+# --- 4. BÚSQUEDA DE ARCHIVOS GPC ---
 def buscar_gpc():
     mapa = {}
     for raiz, carpetas, archivos in os.walk("."):
-        if ".git" in raiz or ".streamlit" in raiz: 
-            continue
+        if ".git" in raiz or ".streamlit" in raiz: continue
         for arch in archivos:
             if arch.endswith(".md") and arch.lower() != "readme.md":
                 nombre = arch.replace(".md", "")
-                carpeta_padre = os.path.basename(raiz)
-                if carpeta_padre and carpeta_padre != ".":
-                    nombre_mostrar = f"{nombre} — [{carpeta_padre}]"
-                else:
-                    nombre_mostrar = nombre
-                mapa[nombre_mostrar] = os.path.join(raiz, arch)
+                mapa[f"{nombre} — [{os.path.basename(raiz)}]"] = os.path.join(raiz, arch)
     return mapa
 
 diccionario_gpc = buscar_gpc()
 
-# --- 6. INTERFAZ: SIDEBAR ---
+# --- 5. INTERFAZ: SIDEBAR ---
 st.sidebar.title("⚙️ Configuración ENARM")
-
-if not diccionario_gpc:
-    st.sidebar.error("❌ No encontré archivos .md.")
-    opciones = []
-else:
-    opciones = sorted(list(diccionario_gpc.keys()))
-
+opciones = sorted(list(diccionario_gpc.keys())) if diccionario_gpc else []
 tema_seleccionado = st.sidebar.selectbox("📖 Selecciona Tema:", opciones, on_change=limpiar_estado)
+tema_limpio = tema_seleccionado.split(" — ")[0] if tema_seleccionado else ""
 
 st.sidebar.markdown("---")
-dificultad_bloom = st.sidebar.radio("🧠 Nivel Cognitivo (Bloom):", [
-    "Bajo (Recordar - Memoria pura)",
-    "Medio (Aplicar - Cuadro clínico directo)",
-    "Alto (Analizar/Evaluar - ¿Qué hacer a continuación?)"
-], index=2)
+dificultad_bloom = st.sidebar.radio("🧠 Nivel Cognitivo:", ["Bajo", "Medio", "Alto"], index=2)
 
-debilidad = st.sidebar.text_input("🎯 Foco específico (Opcional):", placeholder="Ej: Dosis, estándar de oro...")
+# MAGIA SDE: Buscamos en qué ha fallado este usuario para inyectarlo en el prompt
+conceptos_debiles = []
+if tema_seleccionado and tema_limpio in st.session_state.historial["temas"]:
+    conceptos = st.session_state.historial["temas"][tema_limpio]["conceptos_clave"]
+    # Ordenamos los conceptos por cantidad de errores
+    conceptos_debiles = sorted(conceptos.keys(), key=lambda k: conceptos[k]["errores"], reverse=True)[:3]
 
-# --- 7. PESTAÑAS DE NAVEGACIÓN ---
-tab1, tab2 = st.tabs(["📝 Simulador Clínico", "📊 Mi Rendimiento"])
+debilidad_automatica = ", ".join(conceptos_debiles) if conceptos_debiles else "Ninguna registrada aún"
+st.sidebar.info(f"🚨 IA enfocada en tus debilidades: **{debilidad_automatica}**")
+
+# --- 6. PESTAÑAS DE NAVEGACIÓN ---
+tab1, tab2 = st.tabs(["📝 Simulador Clínico", "📊 Mi Rendimiento (Micro-temas)"])
 
 with tab1:
     st.title("Simulador de Casos ENARM")
-    st.markdown("Generación interactiva basada en **gpc-abierta-mx**.")
     
-    if st.button("🚀 Generar Caso de este Tema"):
-        if not tema_seleccionado:
-            st.warning("Selecciona una GPC primero.")
-        else:
-            with st.spinner("El sinodal está creando un caso con trampa..."):
-                ruta_archivo = diccionario_gpc[tema_seleccionado]
-                with open(ruta_archivo, "r", encoding="utf-8") as f:
-                    contenido = f.read()
+    # Generador
+    if st.button("🚀 Generar Nuevo Caso", type="primary") and tema_seleccionado:
+        limpiar_estado() # Limpiamos antes de generar
+        with st.spinner("El sinodal está creando un caso..."):
+            with open(diccionario_gpc[tema_seleccionado], "r", encoding="utf-8") as f: contenido = f.read()
 
-                prompt = f"""
-                Eres un creador de reactivos para el ENARM. Usa la GPC: {contenido}
-                Crea 1 pregunta de caso clínico.
-                
-                REGLAS ESTRICTAS:
-                - Nivel de Taxonomía de Bloom: {dificultad_bloom}.
-                - Enfoque solicitado por el usuario: {debilidad}.
-                - Si es nivel Medio/Alto, NO preguntes teoría. Pregunta "¿Cuál es el estudio inicial?", "¿Cuál es el estándar de oro?", o "¿Cuál es el siguiente paso?".
-                - Usa distractores que parezcan correctos pero que no sean la primera línea de la GPC.
-                
-                DEVUELVE SOLO UN JSON VÁLIDO con esta estructura exacta (sin comillas markdown de código):
-                {{
-                    "historia_clinica": "Paciente...",
-                    "pregunta": "¿Cuál es el siguiente paso en el manejo?",
-                    "opciones": ["A) ...", "B) ...", "C) ...", "D) ..."],
-                    "respuesta_correcta": "A) ...",
-                    "justificacion": "Análisis del Meta-Juego y GPC..."
-                }}
-                """
-                
-                try:
-                    texto_crudo, mod = generar_con_fallback(prompt)
-                    texto_limpio = re.sub(r'```json\n|```\n?', '', texto_crudo).strip()
-                    st.session_state.caso_actual = json.loads(texto_limpio)
-                    st.session_state.evaluado = False
-                    st.success(f"Caso generado con: `{mod}`")
-                except json.JSONDecodeError:
-                    st.error("🚨 La IA no devolvió un JSON válido. Intenta de nuevo.")
-                except Exception as e:
-                    st.error(f"🚨 Error del sistema: {e}")
+            prompt = f"""
+            Eres un creador de reactivos ENARM. Usa la GPC: {contenido}
+            Crea 1 pregunta. Nivel Bloom: {dificultad_bloom}.
+            
+            ATENCIÓN: El usuario ha fallado previamente en estos sub-temas: {debilidad_automatica}.
+            Intenta centrar el caso clínico en alguno de esos conceptos si es posible.
+            
+            DEVUELVE SOLO UN JSON EXACTO:
+            {{
+                "historia_clinica": "Paciente...",
+                "pregunta": "¿Qué procede?",
+                "opciones": ["A) ...", "B) ...", "C) ...", "D) ..."],
+                "respuesta_correcta": "A) ...",
+                "concepto_clave": "Nombre corto de lo que evalúas (ej. Escala de Padua, Dosis Inicial, Criterio Hospitalización)",
+                "justificacion": "Análisis y reglas de descarte..."
+            }}
+            """
+            try:
+                texto_crudo, mod = generar_con_fallback(prompt)
+                texto_limpio = re.sub(r'```json\n|```\n?', '', texto_crudo).strip()
+                st.session_state.caso_actual = json.loads(texto_limpio)
+            except Exception as e:
+                st.error("🚨 Error al generar JSON. Intenta de nuevo.")
 
-    # --- 8. RENDERIZADO BLINDADO DEL CASO ---
+    # Renderizado y Evaluación
     if st.session_state.caso_actual:
         caso = st.session_state.caso_actual
+        st.info(caso.get("historia_clinica", ""))
         
-        historia = caso.get("historia_clinica", "Error: La IA no generó la historia.")
-        st.info(historia)
-        
-        # Extracción defensiva de datos
-        pregunta_texto = caso.get("pregunta", caso.get("texto", "¿Cuál es tu diagnóstico?"))
+        pregunta_texto = caso.get("pregunta", caso.get("texto", "¿Diagnóstico?"))
         opciones = caso.get("opciones", ["A", "B", "C", "D"])
         respuesta_correcta = caso.get("respuesta_correcta", "A")
-        justificacion = caso.get("justificacion", "La IA no dio justificación.")
+        justificacion = caso.get("justificacion", "")
+        concepto_clave = caso.get("concepto_clave", "Concepto General")
 
-        # Por si la IA manda una lista llamada "preguntas"
-        if "preguntas" in caso and isinstance(caso["preguntas"], list) and len(caso["preguntas"]) > 0:
-            primera = caso["preguntas"][0]
-            pregunta_texto = primera.get("pregunta", primera.get("texto", pregunta_texto))
-            opciones = primera.get("opciones", opciones)
-            respuesta_correcta = primera.get("respuesta_correcta", respuesta_correcta)
-            justificacion = primera.get("justificacion", justificacion)
+        # Mostramos sutilmente qué micro-tema se está evaluando
+        st.caption(f"📌 Evaluando: *{concepto_clave}*")
 
         with st.form("examen"):
             st.write(f"**{pregunta_texto}**")
-            
-            if isinstance(opciones, list) and len(opciones) > 0:
-                respuesta_usuario = st.radio("Selecciona tu respuesta:", opciones)
-            else:
-                st.error("Error en las opciones. Genera otro caso.")
-                respuesta_usuario = None
-                
+            respuesta_usuario = st.radio("Selecciona tu respuesta:", opciones)
             submit = st.form_submit_button("✅ Calificar")
             
             if submit and respuesta_usuario:
                 st.session_state.evaluado = True
+                st.session_state.respuesta_usuario = respuesta_usuario
                 
-                # Validación flexible: compara los primeros 2 caracteres ("A)" vs "A)") o el string completo
+                # Validación segura
                 es_correcta = respuesta_usuario[:2].strip() == respuesta_correcta[:2].strip() or respuesta_usuario == respuesta_correcta
+                st.session_state.fue_correcta = es_correcta
                 
-                # Extraemos solo el nombre limpio del tema para la gráfica (quitamos lo que está entre corchetes)
-                tema_limpio = tema_seleccionado.split(" — ")[0]
-                registrar_respuesta(tema_limpio, es_correcta)
+                # Registramos en el libro de fallos con el micro-tema
+                registrar_respuesta(tema_limpio, concepto_clave, es_correcta)
+                st.rerun() # Refresca instantáneamente para mostrar resultados
                 
+        # Mostrar retroalimentación si ya se evaluó (incluso si cambian widgets)
         if st.session_state.evaluado:
             st.markdown("---")
-            if es_correcta:
+            if st.session_state.fue_correcta:
                 st.success("✅ **¡Correcto!**")
             else:
                 st.error("❌ **Incorrecto**")
-                st.write(f"Tu respuesta: `{respuesta_usuario}`")
+                st.write(f"Tu respuesta: `{st.session_state.respuesta_usuario}`")
             
             st.write(f"**Respuesta Correcta:** `{respuesta_correcta}`")
             st.write(f"**Análisis del Sinodal:** {justificacion}")
+            
+            # EL BOTÓN MÁGICO PARA CONTINUAR FLUIDO
+            if st.button("🔄 Generar Siguiente Caso", type="secondary"):
+                limpiar_estado()
+                st.rerun()
 
 with tab2:
-    st.title("📊 Dashboard Analítico ENARM")
+    st.title("📊 Libro de Puntos Débiles")
     hist = st.session_state.historial
     
-    total_preguntas = hist["aciertos"] + hist["errores"]
-    
-    if total_preguntas == 0:
-        st.info("Aún no tienes historial. ¡Resuelve tu primer caso!")
+    if hist["aciertos"] + hist["errores"] == 0:
+        st.info("Aún no tienes historial.")
     else:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Casos Resueltos", total_preguntas)
-        col2.metric("Aciertos", hist["aciertos"])
-        efectividad = round((hist["aciertos"] / total_preguntas) * 100, 1)
-        col3.metric("Efectividad Global", f"{efectividad}%")
+        st.markdown("### 🔬 Disección de tus Errores por Concepto")
         
-        st.markdown("### 🎯 Desempeño por Tema (GPC)")
-        
-        datos_grafica = {"Aciertos": {}, "Errores": {}}
-        for t, stats in hist["temas"].items():
-            datos_grafica["Aciertos"][t] = stats["aciertos"]
-            datos_grafica["Errores"][t] = stats["errores"]
+        # Iteramos sobre el "libro de registros" para extraer los micro-temas
+        for tema, stats_tema in hist["temas"].items():
+            st.markdown(f"#### 📘 {tema}")
             
-        st.bar_chart(datos_grafica)
-        
-        st.markdown("### 🚨 Temas Prioritarios a Repasar")
-        temas_con_errores = False
-        for t, stats in hist["temas"].items():
-            if stats["errores"] > stats["aciertos"]:
-                st.error(f"🔥 {t}: {stats['errores']} errores vs {stats['aciertos']} aciertos")
-                temas_con_errores = True
-                
-        if not temas_con_errores:
-            st.success("¡Excelente! Tienes más aciertos que errores en todos los temas evaluados hasta ahora.")
+            # Revisamos si hay conceptos clave registrados
+            if "conceptos_clave" in stats_tema:
+                for concepto, stats_concepto in stats_tema["conceptos_clave"].items():
+                    err = stats_concepto["errores"]
+                    aci = stats_concepto["aciertos"]
+                    
+                    if err > aci:
+                        st.error(f"**{concepto}:** {err} fallos | {aci} aciertos ⚠️ (Prioridad Alta)")
+                    elif err > 0:
+                        st.warning(f"**{concepto}:** {err} fallos | {aci} aciertos (En progreso)")
+                    else:
+                        st.success(f"**{concepto}:** {err} fallos | {aci} aciertos ✅ (Dominado)")
+            else:
+                st.write("Sin micro-temas registrados aún.")
+            st.markdown("---")
