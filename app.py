@@ -103,9 +103,12 @@ dificultad_bloom = st.sidebar.radio("🧠 Nivel Cognitivo:", ["Bajo", "Medio", "
 # MAGIA SDE: Buscamos en qué ha fallado este usuario para inyectarlo en el prompt
 conceptos_debiles = []
 if tema_seleccionado and tema_limpio in st.session_state.historial["temas"]:
-    conceptos = st.session_state.historial["temas"][tema_limpio]["conceptos_clave"]
+    # Usamos .get() con un diccionario vacío {} por defecto para que soporte JSON viejos
+    conceptos = st.session_state.historial["temas"][tema_limpio].get("conceptos_clave", {})
+    
     # Ordenamos los conceptos por cantidad de errores
     conceptos_debiles = sorted(conceptos.keys(), key=lambda k: conceptos[k]["errores"], reverse=True)[:3]
+
 
 debilidad_automatica = ", ".join(conceptos_debiles) if conceptos_debiles else "Ninguna registrada aún"
 st.sidebar.info(f"🚨 IA enfocada en tus debilidades: **{debilidad_automatica}**")
